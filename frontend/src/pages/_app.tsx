@@ -1,6 +1,31 @@
 import '@/styles/globals.css';
 import type { AppProps } from 'next/app';
 import { useEffect } from 'react';
+import { ChakraProvider, ColorModeScript, extendTheme, ThemeConfig } from '@chakra-ui/react';
+
+// カラーモード設定
+const config: ThemeConfig = {
+  initialColorMode: 'system',
+  useSystemColorMode: true,
+};
+
+// テーマを拡張
+const theme = extendTheme({ 
+  config,
+  styles: {
+    global: (props: { colorMode: string }) => ({
+      body: {
+        bg: props.colorMode === 'dark' ? 'gray.900' : 'white',
+        color: props.colorMode === 'dark' ? 'white' : 'gray.800',
+      },
+    }),
+  },
+  colors: {
+    brand: {
+      500: '#3182ce', // プライマリーカラー
+    },
+  },
+});
 
 function MyApp({ Component, pageProps }: AppProps) {
   // ダークモード設定を初期化
@@ -13,7 +38,14 @@ function MyApp({ Component, pageProps }: AppProps) {
     document.documentElement.classList.toggle('dark', isDarkMode);
   }, []);
 
-  return <Component {...pageProps} />;
+  return (
+    <>
+      <ColorModeScript initialColorMode={theme.config.initialColorMode} />
+      <ChakraProvider theme={theme}>
+        <Component {...pageProps} />
+      </ChakraProvider>
+    </>
+  );
 }
 
 export default MyApp; 

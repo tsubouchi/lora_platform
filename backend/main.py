@@ -62,16 +62,16 @@ create_tables()
 
 # 静的ファイル提供のディレクトリ設定
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STORAGE_DIR = os.path.join(BASE_DIR, "storage")
-os.makedirs(STORAGE_DIR, exist_ok=True)
+STORAGE_DIR = "storage"
+# アップロードディレクトリ
+UPLOAD_DIR = os.path.join(STORAGE_DIR, "uploads")
+# スクリーンショット保存ディレクトリ
+SCREENSHOT_DIR = os.path.join(STORAGE_DIR, "temp", "screenshots")
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 app.mount("/storage", StaticFiles(directory=STORAGE_DIR), name="storage")
 
 # 静的ファイルを提供するためのルートを追加
 app.mount("/static", StaticFiles(directory="backend/static"), name="static")
-
-# スクリーンショット保存用のディレクトリ
-SCREENSHOT_DIR = "backend/temp/screenshots"
-os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 # モックデータ（開発用）- 実際の実装では削除する
 JOBS = [

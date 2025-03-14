@@ -1,167 +1,151 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/router';
-import { FiSun, FiMoon, FiHome, FiList, FiUploadCloud, FiGithub } from 'react-icons/fi';
 import Head from 'next/head';
-import Header from './Header';
-import { Squares } from './ui/squares-background';
+import { FiSun, FiMoon, FiGithub } from 'react-icons/fi';
+import { Box, Flex, useColorMode, useColorModeValue, Container, IconButton, Text } from '@chakra-ui/react';
+import { Squares } from "@/components/ui/squares-background";
 
 interface LayoutProps {
   children: React.ReactNode;
   title?: string;
   description?: string;
-  showHero?: boolean; // heroセクションを表示するかどうか
 }
 
 const Layout: React.FC<LayoutProps> = ({
   children,
   title = 'LoRA作成クラウドサービス',
   description = 'VRMファイルから自動でLoRAモデルを生成するクラウドサービス',
-  showHero = true, // デフォルトではheroセクションを表示
 }) => {
-  const router = useRouter();
-  const [darkMode, setDarkMode] = useState(false);
+  const { colorMode, toggleColorMode } = useColorMode();
   
-  // ダークモード設定の初期化と変更監視
-  useEffect(() => {
-    // ローカルストレージまたはシステム設定からダークモード設定を取得
-    const isDarkMode = localStorage.getItem('darkMode') === 'true' || 
-      (!('darkMode' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    
-    setDarkMode(isDarkMode);
-    document.documentElement.classList.toggle('dark', isDarkMode);
-    
-    // システム設定の変更を監視
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    const handleChange = (e: MediaQueryListEvent) => {
-      if (!('darkMode' in localStorage)) {
-        setDarkMode(e.matches);
-        document.documentElement.classList.toggle('dark', e.matches);
-      }
-    };
-    
-    mediaQuery.addEventListener('change', handleChange);
-    return () => mediaQuery.removeEventListener('change', handleChange);
-  }, []);
+  // カラーモードに応じた色の設定
+  const bgColor = useColorModeValue('gray.50', 'gray.900');
+  const headerBgColor = useColorModeValue('white', 'gray.800');
+  const textColor = useColorModeValue('gray.800', 'white');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
   
-  // ダークモード切り替え
-  const toggleDarkMode = () => {
-    const newDarkMode = !darkMode;
-    setDarkMode(newDarkMode);
-    document.documentElement.classList.toggle('dark', newDarkMode);
-    localStorage.setItem('darkMode', newDarkMode.toString());
-  };
-  
-  // アクティブなナビゲーションリンクのスタイル
-  const isActiveLink = (path: string) => {
-    return router.pathname === path || 
-      (path !== '/' && router.pathname.startsWith(path));
-  };
-  
-  const navLinks = [
-    { path: '/', label: 'ホーム', icon: <FiHome className="w-5 h-5" /> },
-    { path: '/jobs', label: 'ジョブ一覧', icon: <FiList className="w-5 h-5" /> },
-    { path: '/upload', label: 'アップロード', icon: <FiUploadCloud className="w-5 h-5" /> },
-  ];
-
   return (
-    <div className={`flex flex-col min-h-screen bg-gray-50 dark:bg-dark-200 text-gray-900 dark:text-white transition-colors duration-200`}>
-      <Head>
-        <title>{title}</title>
-        <meta name="description" content={description} />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="icon" href="/favicon.ico" />
-      </Head>
-
-      <header className="bg-white dark:bg-dark-100 shadow-sm sticky top-0 z-50 transition-colors duration-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16">
-            <div className="flex items-center">
-              <Link href="/" className="flex items-center">
-                <span className="text-xl font-bold bg-gradient-to-r from-primary-500 to-purple-600 bg-clip-text text-transparent">
-                  LoRA Platform
-                </span>
-              </Link>
-            </div>
-            
-            <nav className="hidden md:flex items-center space-x-4">
-              {navLinks.map((link) => (
-                <Link
-                  key={link.path}
-                  href={link.path}
-                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium transition-colors
-                    ${isActiveLink(link.path) 
-                      ? 'text-primary-600 dark:text-primary-400 bg-primary-50 dark:bg-primary-900/20' 
-                      : 'text-gray-700 dark:text-gray-300 hover:text-primary-600 dark:hover:text-primary-400 hover:bg-gray-100 dark:hover:bg-dark-300'
-                    }`}
-                >
-                  <span className="mr-1.5">{link.icon}</span>
-                  {link.label}
-                </Link>
-              ))}
-            </nav>
-            
-            <div className="flex items-center space-x-4">
-              <button
-                onClick={toggleDarkMode}
-                className="p-2 rounded-full text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-300 focus:outline-none transition-colors"
-                aria-label={darkMode ? 'ライトモードに切り替え' : 'ダークモードに切り替え'}
-              >
-                {darkMode ? (
-                  <FiSun className="h-5 w-5" />
-                ) : (
-                  <FiMoon className="h-5 w-5" />
-                )}
-              </button>
-              
-              <a
-                href="https://github.com/yourusername/lora-platform"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="p-2 rounded-full text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-300 focus:outline-none transition-colors"
-                aria-label="GitHubリポジトリ"
-              >
-                <FiGithub className="h-5 w-5" />
-              </a>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      {/* Heroセクション - showHeroがtrueの場合のみ表示 */}
-      {showHero && (
-        <div className="relative h-[400px] w-full overflow-hidden">
-          <Squares
+    <Box minH="100vh" position="relative">
+      {colorMode === 'dark' && (
+        <Box position="fixed" top="0" left="0" right="0" bottom="0" zIndex="-1">
+          <Squares 
             direction="diagonal"
             speed={0.5}
             squareSize={40}
-            borderColor={darkMode ? "#333" : "#ddd"}
-            hoverFillColor={darkMode ? "#222" : "#f0f0f0"}
+            borderColor="#333" 
+            hoverFillColor="#222"
           />
-          <div className="absolute inset-0 flex items-center justify-center z-5">
-            <h1 className="text-4xl md:text-5xl font-bold text-white text-center px-4">
-              VRMから<span className="text-primary-400">高品質LoRA</span>を自動生成
-            </h1>
-          </div>
-        </div>
+        </Box>
       )}
+      
+      <Box minH="100vh" bg={colorMode === 'light' ? bgColor : 'transparent'}>
+        <Head>
+          <title>{title}</title>
+          <meta name="description" content={description} />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <link rel="icon" href="/favicon.ico" />
+        </Head>
 
-      <main className={`flex-grow ${!showHero ? 'pt-8' : ''}`}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* ヘッダー */}
+        <Box 
+          as="header" 
+          position="sticky" 
+          top={0} 
+          zIndex={10} 
+          bg={headerBgColor} 
+          borderBottomWidth="1px" 
+          borderColor={borderColor}
+          boxShadow="sm"
+        >
+          <Container maxW="container.xl" py={2}>
+            <Flex justify="space-between" align="center">
+              <Flex align="center">
+                <Link href="/" style={{ textDecoration: 'none' }}>
+                  <Text
+                    fontWeight="bold" 
+                    fontSize="xl" 
+                    color={textColor}
+                  >
+                    VRM LoRAプラットフォーム
+                  </Text>
+                </Link>
+              </Flex>
+              
+              <Flex align="center" gap={2}>
+                <IconButton
+                  aria-label={colorMode === 'light' ? 'ダークモードに切替' : 'ライトモードに切替'}
+                  icon={colorMode === 'light' ? <FiMoon /> : <FiSun />}
+                  onClick={toggleColorMode}
+                  size="sm"
+                  variant="ghost"
+                />
+                
+                <IconButton
+                  as="a"
+                  href="https://github.com/yourusername/lora_platform"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="GitHubリポジトリ"
+                  icon={<FiGithub />}
+                  size="sm"
+                  variant="ghost"
+                />
+              </Flex>
+            </Flex>
+          </Container>
+        </Box>
+
+        {/* メインコンテンツ */}
+        <Box as="main" position="relative" zIndex="1">
           {children}
-        </div>
-      </main>
+        </Box>
 
-      <footer className="bg-white dark:bg-dark-100 border-t border-gray-200 dark:border-dark-300 transition-colors duration-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <div className="text-center">
-            <p className="text-sm text-gray-500 dark:text-gray-400">
-              &copy; 2025 Bonginkan. All rights reserved.
-            </p>
-          </div>
-        </div>
-      </footer>
-    </div>
+        {/* フッター */}
+        <Box 
+          as="footer" 
+          py={6} 
+          bg={headerBgColor} 
+          borderTopWidth="1px" 
+          borderColor={borderColor}
+          mt={8}
+          position="relative"
+          zIndex="1"
+        >
+          <Container maxW="container.xl">
+            <Flex 
+              direction={{ base: 'column', md: 'row' }} 
+              justify="space-between" 
+              align={{ base: 'center', md: 'center' }}
+              gap={4}
+            >
+              <Box color={textColor} fontSize="sm">
+                © {new Date().getFullYear()} VRM LoRAプラットフォーム
+              </Box>
+              
+              <Flex gap={4} fontSize="sm">
+                <Link href="/privacy" style={{ textDecoration: 'none' }}>
+                  <Text color={textColor} _hover={{ textDecoration: 'underline' }}>
+                    プライバシーポリシー
+                  </Text>
+                </Link>
+                
+                <Link href="/terms" style={{ textDecoration: 'none' }}>
+                  <Text color={textColor} _hover={{ textDecoration: 'underline' }}>
+                    利用規約
+                  </Text>
+                </Link>
+                
+                <Link href="/contact" style={{ textDecoration: 'none' }}>
+                  <Text color={textColor} _hover={{ textDecoration: 'underline' }}>
+                    お問い合わせ
+                  </Text>
+                </Link>
+              </Flex>
+            </Flex>
+          </Container>
+        </Box>
+      </Box>
+    </Box>
   );
 };
 

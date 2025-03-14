@@ -17,12 +17,14 @@ VRMファイルから3Dアバターの自動処理を行うクラウドプラッ
 - 表情、ライティング、カメラ距離などの組み合わせによる多様なデータセット生成
 - 結果のZIPファイル形式でのダウンロード
 - **環境適応型Chromium管理** - ユーザー環境に最適なChromiumバージョンを自動選択
+- **改良されたVRMビューワー** - タイムアウト処理とエラー耐性を強化
 
 ### 共通機能
 - 非同期ジョブ処理によるバックグラウンド実行
 - リアルタイムの進捗状況追跡
 - ジョブ管理とステータス表示
 - 永続的なジョブ履歴とデータベース管理
+- **統一されたファイル管理構造** - ストレージディレクトリの一貫した管理
 
 ## 技術スタック
 
@@ -58,7 +60,7 @@ git clone https://github.com/yourusername/lora_platform.git
 cd lora_platform
 
 # ディレクトリ構造の確認
-mkdir -p storage/{uploads,datasets,results,logs,chromium}
+mkdir -p storage/{uploads,datasets,results,logs,chromium,temp}
 ```
 
 ### バックエンドのセットアップ
@@ -183,6 +185,12 @@ cd scripts
 6. 進捗状況を確認
 7. 処理完了後、生成されたZIPファイルをダウンロード
 
+#### ミニマルモード
+複雑なデータセットを必要としない場合、以下のオプションが利用可能：
+
+- **use_minimal=true** パラメータを指定：シンプルな設定で高速にデータセットを生成します
+- 例: `curl -F "file=@maria.vrm" -F "use_minimal=true" http://localhost:8000/dataset/generate`
+
 ## プロジェクト構造
 
 ```
@@ -225,6 +233,7 @@ lora_platform/
 │   ├── logs/ - ログファイル
 │   ├── results/ - 生成結果
 │   ├── temp/ - 一時ファイル
+│   │   └── screenshots/ - スクリーンショット一時保存
 │   └── uploads/ - アップロードファイル
 ├── database/ - SQLiteデータベース
 │   └── lora_platform.db - メインデータベース
@@ -250,114 +259,17 @@ lora_platform/
    ./install_chakra_ui.sh
    ```
 
-### バックエンドの問題
+4. **VRMビューワーのタイムアウトエラー**：
+   - ファイルパスが正しく設定されているか確認してください
+   - ストレージディレクトリ構造が正しく作成されているか確認してください
+   - ブラウザがVRMファイルにアクセスできるか確認してください
 
-1. **インポートエラー（`ImportError: attempted relative import with no known parent package`）**:
-
-   この問題は、Pythonスクリプトを直接実行しようとしたときに相対インポートが失敗することで発生します。
-
-   **解決策**:
-   - 相対インポートを絶対インポートに変更する：
-     ```python
-     # 変更前
-     from . import job_processor
-     from ..models.database import Job
-
-     # 変更後
-     import job_processor  # 同じディレクトリ内の場合
-     from backend.models.database import Job  # または from models.database import Job
-     ```
-
-   - またはPythonモジュールとして実行する：
-     ```bash
-     cd lora_platform  # プロジェクトルートディレクトリ
-     python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-     ```
-
-2. **関数またはクラスがインポートできない（`ImportError: cannot import name 'xxx' from 'yyy'`）**:
-
-   関数名やクラス名のミスマッチが原因で発生します。
-
-   **解決策**:
-   - 実際の関数名/クラス名を確認し、インポート文を修正：
-     ```python
-     # 例: 関数名の修正
-     # 変更前
-     from dataset_generator import generate_dataset_from_vrm
-     
-     # 変更後（正しい関数名を使用）
-     from dataset_generator import generate_dataset
-     ```
-
-3. **ヘッドレスブラウザが起動しない（`No module named 'dataset_generator'`）**:
-
-   ディレクトリ構造とインポートパスの問題が原因です。
-
-   **解決策**:
-   - インポートパスを確認し修正する
-   - 必要な定数が定義されていることを確認する（`JOB_STATUSES`, `DATASET_DIR`など）
-   - ストレージディレクトリが存在することを確認する：
-     ```bash
-     mkdir -p storage/{uploads,datasets,logs,results,temp,chromium}
-     ```
-
-4. **データベースエラー**：
+5. **「table jobs has no column named job_type」エラー**：
+   データベースのスキーマが最新でない可能性があります。以下のコマンドでデータベースを再初期化してください：
    ```bash
-   # データベースを初期化
    cd backend
    python -c "from models.database import Base, engine; Base.metadata.drop_all(engine); Base.metadata.create_all(engine)"
    ```
-
-5. **Chromium関連のエラー**：
-   ```bash
-   # Chromiumディレクトリを削除して再初期化
-   rm -rf storage/chromium
-   mkdir -p storage/chromium
-   
-   # Chromeがインストールされていることを確認
-   # Windows: "C:\Program Files\Google\Chrome\Application\chrome.exe" --version
-   # macOS: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
-   # Linux: google-chrome --version
-   ```
-
-### Pythonパッケージ構造のベストプラクティス
-
-このプロジェクトを正しく実行するためのPythonパッケージ構造ベストプラクティス：
-
-1. **インポート方法**: 
-   - 相対インポートではなく絶対インポートを優先する
-   - モジュールのインポートパスを明確にする
-   - 循環インポートを避ける
-
-2. **起動方法**:
-   - アプリケーションをパッケージとして起動する：
-     ```bash
-     cd lora_platform
-     python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-     ```
-
-3. **ディレクトリ構造**:
-   - 必要なすべてのディレクトリがあることを確認する：
-     ```bash
-     mkdir -p storage/{uploads,datasets,logs,results,temp,chromium}
-     ```
-
-4. **定数の定義**:
-   - 必要な定数（`JOB_STATUSES`, `DATASET_DIR`など）が各モジュールで適切に定義されていることを確認する
-
-これらのガイドラインに従うことで、プロジェクトの起動時に発生する可能性のあるエラーを防ぐことができます。
-
-### フロントエンドの問題
-
-1. **Reactアプリが起動しない**：
-   ```
-   cd frontend
-   rm -rf node_modules
-   npm install
-   ```
-
-2. **ジョブ進捗が表示されない**：
-   コンソールでWebSocket接続エラーがないか確認してください。必要に応じてバックエンドのURLを確認してください。
 
 ## Chromiumバージョン管理システム
 

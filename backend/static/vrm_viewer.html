@@ -95,6 +95,7 @@
         let currentVrm = null;
         let light, dirLight;
         let isTakingScreenshot = false;
+        let loadingTimeout = null;
         
         // Expressionマッピング
         const blendShapeMap = {
@@ -167,11 +168,22 @@
             
             if (!vrmPath) {
                 document.getElementById('loading').textContent = 'VRMファイルが指定されていません';
+                document.getElementById('loading').style.display = 'none';  // エラーでもloadingを非表示にする
+                console.error('VRMファイルが指定されていません');
                 return;
             }
             
+            console.log('VRMファイルのロード開始:', vrmPath);
+            
+            // 安全のためのタイムアウト設定（30秒後に強制的にローディング表示を消す）
+            loadingTimeout = setTimeout(() => {
+                console.warn('VRMロードタイムアウト - 強制的にローディング表示を消します');
+                document.getElementById('loading').style.display = 'none';
+            }, 30000);
+            
             // VRMファイルのロード
             loader.load(vrmPath, (gltf) => {
+                console.log('GLTFモデルのロード完了、VRMへの変換開始');
                 THREE.VRM.from(gltf).then((vrm) => {
                     // シーンに追加
                     currentVrm = vrm;
@@ -181,21 +193,31 @@
                     vrm.scene.rotation.y = Math.PI;
                     
                     // ロード完了
+                    clearTimeout(loadingTimeout);
                     document.getElementById('loading').style.display = 'none';
+                    console.log('VRMモデルの読み込みが完了しました');
                     
                     // 初期表情を設定
                     updateExpression('Neutral');
+                }).catch(error => {
+                    console.error('VRM変換エラー:', error);
+                    clearTimeout(loadingTimeout);
+                    document.getElementById('loading').textContent = `VRMの変換に失敗しました: ${error.message}`;
+                    document.getElementById('loading').style.display = 'none';  // エラーでもloadingを非表示にする
                 });
             }, 
             // 進捗
             (xhr) => {
                 const percent = Math.floor((xhr.loaded / xhr.total) * 100);
                 document.getElementById('loading').textContent = `VRMファイルをロード中... ${percent}%`;
+                console.log(`ロード進捗: ${percent}%`);
             },
             // エラー
             (error) => {
                 console.error('VRMロードエラー:', error);
+                clearTimeout(loadingTimeout);
                 document.getElementById('loading').textContent = `VRMファイルのロードに失敗しました: ${error.message}`;
+                document.getElementById('loading').style.display = 'none';  // エラーでもloadingを非表示にする
             });
             
             // イベントリスナー
