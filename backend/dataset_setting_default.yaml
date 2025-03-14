@@ -1,0 +1,50 @@
+# VRMビューアーを使用したデータセット生成のデフォルト設定
+
+# カメラアングル設定
+angle:
+  start: 0       # 開始角度 (0-359度)
+  end: 350       # 終了角度 (0-359度)
+  step: 10       # 角度間隔 (度)
+
+# 表情バリエーション
+expressions:
+  - Neutral      # 通常
+  - Happy        # 笑顔
+  - Sad          # 悲しい
+  - Angry        # 怒り
+  - Surprised    # 驚き
+
+# ライティング条件
+lighting:
+  - Bright       # 明るい
+  - Normal       # 標準
+  - Soft         # ソフト
+
+# カメラ距離
+camera_distance:
+  - Close-up     # クローズアップ (顔中心)
+  - Mid-shot     # ミドルショット (上半身)
+  - Full-body    # 全身
+
+# 最小構成設定（高速処理用）
+minimal_config:
+  expressions:
+    - Neutral
+  lighting:
+    - Normal
+  camera_distance:
+    - Mid-shot
+    - Close-up
+
+# 出力設定
+output:
+  format: png           # 出力形式
+  resolution: 512x512   # 解像度
+  quality: 90           # 画質 (1-100)
+  background: "#FFFFFF" # 背景色
+
+# メタデータ設定
+metadata:
+  include_params: true  # パラメータ情報をメタデータに含める
+  timestamp: true       # タイムスタンプを含める
+  naming_format: "shot_{expression}_{lighting}_{distance}_angle{angle:03d}.png"  # ファイル命名規則 

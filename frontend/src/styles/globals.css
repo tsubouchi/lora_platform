@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 25, 25, 25;
+  --background-rgb: 250, 250, 250;
+}
+
+:root.dark {
+  --foreground-rgb: 255, 255, 255;
+  --background-rgb: 15, 15, 15;
+}
+
+body {
+  @apply bg-gray-50 text-gray-900 dark:bg-background dark:text-white transition-colors duration-200;
+}
+
+/* カスタムコンポーネントスタイル */
+@layer components {
+  .btn {
+    @apply px-4 py-2 rounded-md font-medium focus:outline-none focus:ring-2 focus:ring-offset-2 ring-offset-gray-50 dark:ring-offset-background transition-colors duration-200;
+  }
+  
+  .btn-primary {
+    @apply bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-500;
+  }
+  
+  .btn-secondary {
+    @apply bg-gray-200 text-gray-800 hover:bg-gray-300 dark:bg-dark-100 dark:text-white dark:hover:bg-dark-200 focus:ring-gray-500;
+  }
+  
+  .btn-danger {
+    @apply bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+  }
+  
+  .card {
+    @apply bg-white dark:bg-dark-100 rounded-lg shadow-md p-4 border border-gray-200 dark:border-gray-800;
+  }
+  
+  .input {
+    @apply w-full px-3 py-2 border border-gray-300 bg-white dark:border-dark-100 dark:bg-dark-200 rounded-md shadow-sm text-gray-900 dark:text-white focus:outline-none focus:ring-primary-500 focus:border-primary-500;
+  }
+
+  .drop-area {
+    @apply border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors border-gray-300 bg-gray-50 hover:border-primary-400 dark:border-gray-700 dark:bg-dark-200 dark:hover:border-primary-400;
+  }
+
+  .drop-area-active {
+    @apply border-solid border-primary-500 bg-gray-100 dark:bg-dark-100;
+  }
+} 

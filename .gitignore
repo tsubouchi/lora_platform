@@ -1,0 +1,64 @@
+# Python関連
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+.venv/
+ENV/
+
+# Node.js関連
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+package-lock.json
+
+# ストレージ（一部のみ）
+storage/uploads/*
+storage/datasets/*
+storage/logs/*
+storage/results/*
+storage/temp/*
+storage/chromium/*
+!storage/uploads/.gitkeep
+!storage/datasets/.gitkeep
+!storage/logs/.gitkeep
+!storage/results/.gitkeep
+!storage/temp/.gitkeep
+!storage/chromium/.gitkeep
+
+# データベース
+*.db
+*.sqlite3
+
+# エディタ関連
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ログファイル
+*.log
+
+# 大きなファイル
+*.vrm
+*.zip
+*.safetensors 
