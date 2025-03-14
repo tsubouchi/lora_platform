@@ -27,12 +27,28 @@ Base = declarative_base()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def get_db():
-    """データベースセッションを取得するユーティリティ関数"""
+    """データベースセッションを取得するユーティリティ関数（FastAPIのDependsで使用）"""
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+def get_db_session():
+    """コンテキストマネージャとして使用できるデータベースセッションを返す"""
+    class SessionManager:
+        def __init__(self):
+            self.db = SessionLocal()
+            
+        def __enter__(self):
+            return self.db
+            
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            if exc_type is not None:
+                self.db.rollback()
+            self.db.close()
+    
+    return SessionManager()
 
 # ジョブモデル
 class Job(Base):

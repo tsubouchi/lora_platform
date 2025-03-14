@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -20,6 +20,7 @@ from backend.api import health as health_api
 from backend.api import dataset as dataset_api
 import logging
 import time
+import base64
 
 # ロギング設定
 logging.basicConfig(
@@ -64,6 +65,13 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 app.mount("/storage", StaticFiles(directory=STORAGE_DIR), name="storage")
+
+# 静的ファイルを提供するためのルートを追加
+app.mount("/static", StaticFiles(directory="backend/static"), name="static")
+
+# スクリーンショット保存用のディレクトリ
+SCREENSHOT_DIR = "backend/temp/screenshots"
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 # モックデータ（開発用）- 実際の実装では削除する
 JOBS = [
@@ -114,7 +122,7 @@ async def startup_event():
     
     # Chromium管理システムの初期化
     try:
-        from dataset_generator import initialize_chromium_environment
+        from backend.dataset_generator import initialize_chromium_environment
         logger.info("Chromium管理システムを初期化中...")
         initialize_chromium_environment()
         logger.info("Chromium管理システムの初期化が完了しました")
@@ -335,6 +343,85 @@ async def upload_file(
         "status": db_job.status,
         "message": "File uploaded successfully",
     }
+
+# スクリーンショットデータ受信モデル
+class ScreenshotData(BaseModel):
+    screenshot: str  # Base64エンコードされたデータURL
+    expression: str
+    lighting: str
+    distance: str
+    angle: str
+
+# VRMファイルを返すエンドポイント
+@app.get("/vrm/{filename}")
+async def get_vrm_file(filename: str):
+    # 1. アップロードディレクトリから探す
+    vrm_path = os.path.join(STORAGE_DIR, "uploads", filename)
+    if os.path.exists(vrm_path):
+        logger.info(f"VRMファイルをアップロードディレクトリから提供: {vrm_path}")
+        return FileResponse(vrm_path)
+    
+    # 2. job_idが含まれている場合はファイル名から元のファイル名を抽出して探す
+    if '_' in filename:
+        parts = filename.split('_', 1)
+        if len(parts) > 1:
+            original_filename = parts[1]  # job_id_filename.vrm からfilenameを抽出
+            original_path = os.path.join(STORAGE_DIR, "uploads", original_filename)
+            if os.path.exists(original_path):
+                logger.info(f"VRMファイルをオリジナル名で提供: {original_path}")
+                return FileResponse(original_path)
+    
+    # 3. プロジェクトルートから探す
+    alt_path = os.path.join(os.getcwd(), filename)
+    if os.path.exists(alt_path):
+        logger.info(f"VRMファイルをプロジェクトルートから提供: {alt_path}")
+        return FileResponse(alt_path)
+    
+    # 4. エラー - ログに詳細を出力
+    logger.error(f"VRMファイル {filename} が見つかりません。検索パス: {vrm_path}, {alt_path}")
+    raise HTTPException(status_code=404, detail=f"VRMファイル {filename} が見つかりません")
+
+# スクリーンショット保存用のAPIエンドポイント
+@app.post("/api/screenshot")
+async def save_screenshot(data: ScreenshotData, job_id: str = Query(...)):
+    try:
+        # ジョブの存在確認
+        job = job_processor.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"ジョブID {job_id} が見つかりません")
+        
+        # ジョブディレクトリ作成
+        job_dir = os.path.join(SCREENSHOT_DIR, job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        
+        # Base64データURLからPNGデータを抽出
+        _, base64_data = data.screenshot.split(",", 1)
+        image_data = base64.b64decode(base64_data)
+        
+        # ファイル名生成 (expression_lighting_distance_angle.png)
+        filename = f"{data.expression}_{data.lighting}_{data.distance}_{data.angle}.png"
+        filepath = os.path.join(job_dir, filename)
+        
+        # ファイル書き込み
+        with open(filepath, "wb") as f:
+            f.write(image_data)
+        
+        # 進捗更新 (イベントとして処理される)
+        job_processor.update_job_progress(job_id, {"captured": filename})
+        
+        return {"success": True, "filename": filename}
+    except Exception as e:
+        logger.error(f"スクリーンショット保存エラー: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"スクリーンショット保存に失敗しました: {str(e)}")
+
+# VRMビューワーへのリダイレクト
+@app.get("/view/{job_id}/{filename}")
+async def view_vrm(job_id: str, filename: str):
+    # VRMファイルへのパスを生成 (相対パスではなく絶対URL)
+    vrm_url = f"/vrm/{filename}"
+    # VRMビューワーページへリダイレクト (クエリパラメータでVRMパスとジョブIDを渡す)
+    viewer_url = f"/static/vrm_viewer.html?vrm={vrm_url}&job_id={job_id}"
+    return RedirectResponse(url=viewer_url)
 
 # アプリケーション起動（直接実行時のみ）
 if __name__ == "__main__":

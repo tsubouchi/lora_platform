@@ -261,16 +261,15 @@ async def generate_dataset(
                      f"ショット数: {total_shots}, 推定サイズ: {estimated_size}MB, 推定時間: {estimated_time}分")
         
         # ジョブをキューに追加
-        success = add_job(
-            job_id, 
-            "dataset", 
-            file_path, 
-            job_params
-        )
-        
-        if not success:
-            logger.error(f"ジョブの追加に失敗しました: {job_id}")
-            raise HTTPException(status_code=500, detail="ジョブの追加に失敗しました")
+        try:
+            job_id = add_job(
+                "dataset", 
+                file_path, 
+                job_params
+            )
+        except Exception as e:
+            logger.error(f"ジョブの追加に失敗しました: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"ジョブの追加に失敗しました: {str(e)}")
         
         # レスポンス
         return {

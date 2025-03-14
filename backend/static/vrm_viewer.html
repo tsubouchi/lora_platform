@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ローカルVRMビューワー</title>
+    <script src="https://unpkg.com/three@0.147.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/three@0.147.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://unpkg.com/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://unpkg.com/@pixiv/three-vrm@0.6.7/lib/three-vrm.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+        #controls {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            color: white;
+            z-index: 100;
+            border-radius: 5px;
+        }
+        .control-group {
+            margin-bottom: 10px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        button {
+            margin-top: 5px;
+            padding: 5px 10px;
+        }
+        #loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 20px;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">VRMファイルをロード中...</div>
+    <div id="controls">
+        <div class="control-group">
+            <label for="expression">表情:</label>
+            <select id="expression">
+                <option value="Neutral">Neutral</option>
+                <option value="Happy">Happy</option>
+                <option value="Sad">Sad</option>
+                <option value="Angry">Angry</option>
+                <option value="Surprised">Surprised</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="lighting">ライティング:</label>
+            <select id="lighting">
+                <option value="Normal">Normal</option>
+                <option value="Bright">Bright</option>
+                <option value="Soft">Soft</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="distance">カメラ距離:</label>
+            <select id="distance">
+                <option value="Close-up">Close-up</option>
+                <option value="Mid-shot">Mid-shot</option>
+                <option value="Full-body">Full-body</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="rotation">回転角度: <span id="rotationValue">0</span>度</label>
+            <input type="range" id="rotation" min="0" max="360" value="0" step="10">
+        </div>
+        <button id="takeScreenshot">スクリーンショットを撮る</button>
+    </div>
+
+    <script>
+        // グローバル変数
+        let camera, scene, renderer, controls;
+        let currentVrm = null;
+        let light, dirLight;
+        let isTakingScreenshot = false;
+        
+        // Expressionマッピング
+        const blendShapeMap = {
+            Neutral: {},  // 何も設定しない
+            Happy: { "Joy": 1.0 },
+            Sad: { "Sorrow": 1.0 },
+            Angry: { "Angry": 1.0 },
+            Surprised: { "Surprised": 1.0 }
+        };
+        
+        // カメラ距離のマッピング
+        const cameraDistanceMap = {
+            "Close-up": 0.3,
+            "Mid-shot": 0.7,
+            "Full-body": 1.5
+        };
+        
+        // ライティングのマッピング
+        const lightingMap = {
+            "Normal": { intensity: 1.0, dirIntensity: 0.8 },
+            "Bright": { intensity: 1.5, dirIntensity: 1.2 },
+            "Soft": { intensity: 0.7, dirIntensity: 0.5 }
+        };
+        
+        // 初期化
+        window.addEventListener('DOMContentLoaded', init);
+        
+        function init() {
+            // レンダラー
+            renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setClearColor(0xf0f0f0);
+            document.body.appendChild(renderer.domElement);
+            
+            // シーン
+            scene = new THREE.Scene();
+            
+            // カメラ
+            camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20);
+            camera.position.set(0, 1, 5);
+            
+            // コントロール
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.25;
+            controls.screenSpacePanning = true;
+            
+            // ライト
+            light = new THREE.AmbientLight(0xffffff, 1.0);
+            scene.add(light);
+            
+            dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(1, 1, 1);
+            scene.add(dirLight);
+            
+            // グリッド
+            const gridHelper = new THREE.GridHelper(10, 10);
+            scene.add(gridHelper);
+            
+            // リサイズ対応
+            window.addEventListener('resize', onWindowResize);
+            
+            // ローダー
+            const loader = new THREE.GLTFLoader();
+            
+            // クエリパラメータからVRMファイルのパスを取得
+            const urlParams = new URLSearchParams(window.location.search);
+            const vrmPath = urlParams.get('vrm');
+            
+            if (!vrmPath) {
+                document.getElementById('loading').textContent = 'VRMファイルが指定されていません';
+                return;
+            }
+            
+            // VRMファイルのロード
+            loader.load(vrmPath, (gltf) => {
+                THREE.VRM.from(gltf).then((vrm) => {
+                    // シーンに追加
+                    currentVrm = vrm;
+                    scene.add(vrm.scene);
+                    
+                    // モデルの角度調整
+                    vrm.scene.rotation.y = Math.PI;
+                    
+                    // ロード完了
+                    document.getElementById('loading').style.display = 'none';
+                    
+                    // 初期表情を設定
+                    updateExpression('Neutral');
+                });
+            }, 
+            // 進捗
+            (xhr) => {
+                const percent = Math.floor((xhr.loaded / xhr.total) * 100);
+                document.getElementById('loading').textContent = `VRMファイルをロード中... ${percent}%`;
+            },
+            // エラー
+            (error) => {
+                console.error('VRMロードエラー:', error);
+                document.getElementById('loading').textContent = `VRMファイルのロードに失敗しました: ${error.message}`;
+            });
+            
+            // イベントリスナー
+            document.getElementById('expression').addEventListener('change', (e) => {
+                updateExpression(e.target.value);
+            });
+            
+            document.getElementById('lighting').addEventListener('change', (e) => {
+                updateLighting(e.target.value);
+            });
+            
+            document.getElementById('distance').addEventListener('change', (e) => {
+                updateCameraDistance(e.target.value);
+            });
+            
+            document.getElementById('rotation').addEventListener('input', (e) => {
+                const angle = parseInt(e.target.value);
+                document.getElementById('rotationValue').textContent = angle;
+                updateRotation(angle);
+            });
+            
+            document.getElementById('takeScreenshot').addEventListener('click', () => {
+                takeScreenshot();
+            });
+            
+            // アニメーション開始
+            animate();
+        }
+        
+        function updateExpression(expressionName) {
+            if (!currentVrm) return;
+            
+            // すべてのブレンドシェイプをリセット
+            Object.keys(blendShapeMap).forEach(expression => {
+                const blendShapes = blendShapeMap[expression];
+                Object.keys(blendShapes).forEach(shape => {
+                    currentVrm.blendShapeProxy.setValue(shape, 0);
+                });
+            });
+            
+            // 選択された表情を設定
+            const blendShapes = blendShapeMap[expressionName];
+            Object.keys(blendShapes).forEach(shape => {
+                currentVrm.blendShapeProxy.setValue(shape, blendShapes[shape]);
+            });
+        }
+        
+        function updateLighting(lightingName) {
+            if (!light || !dirLight) return;
+            
+            const settings = lightingMap[lightingName];
+            light.intensity = settings.intensity;
+            dirLight.intensity = settings.dirIntensity;
+        }
+        
+        function updateCameraDistance(distanceName) {
+            if (!camera || !controls) return;
+            
+            const distance = cameraDistanceMap[distanceName];
+            // モデルの頭部付近を固定点とし、そこから一定距離離れるようにカメラを設定
+            const height = currentVrm ? 1.5 : 1.0;
+            camera.position.set(0, height, distance * 5);
+            controls.target.set(0, height, 0);
+            controls.update();
+        }
+        
+        function updateRotation(angle) {
+            if (!currentVrm) return;
+            
+            // モデルを回転
+            const radians = (angle * Math.PI) / 180;
+            currentVrm.scene.rotation.y = Math.PI + radians;
+        }
+        
+        function takeScreenshot() {
+            if (isTakingScreenshot || !currentVrm) return;
+            
+            isTakingScreenshot = true;
+            
+            // コントロールUIを一時的に非表示
+            const controls = document.getElementById('controls');
+            controls.style.display = 'none';
+            
+            // 次のフレームでスクリーンショットを撮影
+            requestAnimationFrame(() => {
+                // スクリーンショットを撮影
+                renderer.render(scene, camera);
+                const screenshot = renderer.domElement.toDataURL('image/png');
+                
+                // スクリーンショット情報
+                const expressionValue = document.getElementById('expression').value;
+                const lightingValue = document.getElementById('lighting').value;
+                const distanceValue = document.getElementById('distance').value;
+                const rotationValue = document.getElementById('rotation').value;
+                
+                // HTMLに情報を埋め込んで送信
+                fetch('/api/screenshot', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        screenshot: screenshot,
+                        expression: expressionValue,
+                        lighting: lightingValue,
+                        distance: distanceValue,
+                        angle: rotationValue
+                    })
+                }).then(response => {
+                    console.log('スクリーンショット送信完了:', response);
+                }).catch(error => {
+                    console.error('スクリーンショット送信エラー:', error);
+                }).finally(() => {
+                    // コントロールUIを再表示
+                    controls.style.display = 'block';
+                    isTakingScreenshot = false;
+                });
+            });
+        }
+        
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            
+            if (currentVrm) {
+                currentVrm.update(clock.getDelta());
+            }
+            
+            renderer.render(scene, camera);
+        }
+        
+        // クロック初期化
+        const clock = new THREE.Clock();
+    </script>
+</body>
+</html> 

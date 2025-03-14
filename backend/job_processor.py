@@ -12,21 +12,31 @@ import traceback
 import signal
 from queue import Queue, Empty
 from typing import Dict, List, Optional, Any, Tuple
+from backend.models.database import SessionLocal, Job, File, DatasetMetadata, DatasetShot, init_db, get_db_session
+import shutil
+import zipfile
+from backend.dataset_generator import generate_dataset as generate_vrm_dataset
 
-# ジョブステータス定数
+# グローバル変数
+_processor = None
+_stop_event = threading.Event()
+
+# 定数定義
 JOB_STATUSES = {
-    "queued": "queued",         # キュー内
-    "processing": "processing",  # 処理中
-    "completed": "completed",    # 完了
-    "error": "error",           # エラー
-    "cancelled": "cancelled",    # キャンセル
-    "not_found": "not_found"     # 見つからない
+    "QUEUED": "queued",
+    "PROCESSING": "processing",
+    "COMPLETED": "completed",
+    "ERROR": "error",
+    "CANCELLED": "cancelled"
 }
 
 # ディレクトリ設定
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
 DATASET_DIR = os.path.join(STORAGE_DIR, "datasets")
+
+# データベースパスを明示的に定義
+DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "database", "lora_platform.db")
 
 # データベースモデルのインポート
 from backend.models.database import SessionLocal, Job, File, DatasetMetadata, DatasetShot, init_db
@@ -44,7 +54,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("backend.job_processor")
 
 # ディレクトリ設定
 UPLOAD_DIR = os.path.join(BASE_DIR, 'storage', 'uploads')
@@ -192,81 +202,140 @@ class JobProcessor:
         
         logger.info(f"ジョブステータスが更新されました: {job_id}, ステータス: {status}, 進捗: {progress}")
 
-def add_job(job_type: str, file_path: str, parameters: Dict[str, Any] = None) -> str:
-    """ジョブをキューに追加し、ジョブIDを返す"""
-    try:
-        job_id = str(uuid.uuid4())
-        submission_time = datetime.datetime.now()
-        parameters = parameters or {}
+    def _generate_dataset(self, job_id: str, vrm_file_path: str, settings: Dict[str, Any]) -> str:
+        """データセットを生成する
+
+        Args:
+            job_id: ジョブID
+            vrm_file_path: VRMファイルのパス
+            settings: 生成設定
+
+        Returns:
+            str: 生成されたZIPファイルのパス
+        """
+        logger.info(f"データセット生成ジョブを開始します: {job_id}")
         
-        # データベースにジョブを登録
-        db = SessionLocal()
         try:
+            # 進捗更新コールバック関数を定義
+            def progress_update_callback(progress_data: Dict[str, Any], message: str = None):
+                # progress_dataから情報を取得
+                if isinstance(progress_data, dict):
+                    # 新しいインターフェース: 辞書型で進捗情報が渡される場合
+                    progress = progress_data.get("progress", 0)
+                    message = progress_data.get("status", message or "処理中...")
+                else:
+                    # 古いインターフェース: 進捗値が直接渡される場合
+                    progress = progress_data
+                    message = message or "処理中..."
+                
+                _update_dataset_progress(
+                    job_id=job_id,
+                    progress=progress,
+                    message=message
+                )
+            
+            # 引数チェック - use_minimal が settings ディクショナリ内に存在するようにする
+            if 'use_minimal' not in settings:
+                logger.info("use_minimal が settings に存在しないため、デフォルト値 False を設定します")
+                settings['use_minimal'] = False
+            
+            # 実際のVRMビューワーを使用してデータセットを生成
+            zip_file_path = generate_vrm_dataset(
+                job_id=job_id,
+                vrm_file_path=vrm_file_path,
+                settings=settings,
+                progress_callback=progress_update_callback
+            )
+            
+            # ジョブディレクトリにコピー
+            job_dir = os.path.join(STORAGE_DIR, job_id)
+            os.makedirs(job_dir, exist_ok=True)
+            
+            dest_path = os.path.join(job_dir, f"{job_id}_dataset.zip")
+            shutil.copy2(zip_file_path, dest_path)
+            
+            # 元のZIPファイルを削除
+            os.unlink(zip_file_path)
+            
+            return dest_path
+        except Exception as e:
+            logger.error(f"データセット生成に失敗しました: {str(e)}")
+            raise Exception(f"データセット生成に失敗しました: {str(e)}")
+
+def add_job(job_type: str, file_path: str, parameters: Dict[str, Any] = None) -> str:
+    """新しいジョブをデータベースに追加"""
+    if parameters is None:
+        parameters = {}
+        
+    job_id = str(uuid.uuid4())
+    
+    try:
+        # ログは残しますが、デバッグログを整理
+        logger.info(f"ジョブを追加します: タイプ={job_type}, ファイル={file_path}")
+        
+        # DB接続とジョブ追加
+        with get_db_session() as session:
             # ジョブエントリの作成
             new_job = Job(
                 job_id=job_id,
                 job_type=job_type,
                 status="queued",
-                submission_time=submission_time,
+                submission_time=datetime.datetime.now(),
                 file_path=file_path,
                 job_parameters=parameters,
                 progress=0,
                 message="キューに追加されました"
             )
-            db.add(new_job)
+            session.add(new_job)
             
             # ファイルエントリの作成
-            file_name = os.path.basename(file_path)
-            file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-            
+            try:
+                file_size = os.path.getsize(file_path)
+            except Exception:
+                file_size = 0
+                
             new_file = File(
+                file_id=str(uuid.uuid4()),
                 job_id=job_id,
                 file_type="upload",
                 file_path=file_path,
-                file_name=file_name,
                 file_size=file_size,
                 mime_type="application/octet-stream",  # デフォルト値
-                created_at=submission_time
+                created_at=datetime.datetime.now()
             )
-            db.add(new_file)
+            session.add(new_file)
             
             # データセットジョブの場合はメタデータも追加
             if job_type == "dataset":
                 metadata = DatasetMetadata(
+                    metadata_id=str(uuid.uuid4()),
                     job_id=job_id,
-                    vrm_file_name=file_name,
                     angle_start=parameters.get('angle_start', 0),
                     angle_end=parameters.get('angle_end', 360),
-                    angle_step=parameters.get('angle_step', 15),
+                    angle_step=parameters.get('angle_step', 10),
                     expressions=parameters.get('expressions', []),
                     lighting=parameters.get('lighting', []),
                     camera_distance=parameters.get('camera_distance', []),
-                    total_shots=parameters.get('total_shots', 0),
-                    completed_shots=0,
-                    output_format=parameters.get('output_format', 'png'),
-                    output_resolution=parameters.get('output_resolution', '512x512'),
-                    output_quality=parameters.get('output_quality', 90),
-                    background_color=parameters.get('background_color', '#FFFFFF'),
                     use_minimal=parameters.get('use_minimal', False)
                 )
-                db.add(metadata)
+                session.add(metadata)
             
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            logger.error(f"ジョブの追加中にデータベースエラーが発生しました: {str(e)}")
-            raise
-        finally:
-            db.close()
+            session.commit()
         
         # キューにジョブを追加
-        job_queue.put(job_id)
+        processor = _get_processor()
+        if processor:
+            processor.add_job(job_type, file_path, parameters)
+        else:
+            # プロセッサが初期化されていない場合はここで処理を開始
+            _process_job_async(job_id)
+            
         logger.info(f"ジョブが追加されました: {job_id}, タイプ: {job_type}")
-        
         return job_id
     except Exception as e:
         logger.error(f"ジョブの追加中にエラーが発生しました: {str(e)}")
-        traceback.print_exc()
+        if "stack trace" not in str(e).lower():
+            logger.error(traceback.format_exc())
         raise
 
 def get_job_status(job_id: str) -> Dict[str, Any]:
@@ -592,17 +661,46 @@ def _generate_dataset(job_id: str, file_path: str, parameters: Dict[str, Any], p
     logger.info(f"データセット生成ジョブを開始: {job_id}, ファイル: {file_path}")
     
     try:
-        # データセット生成関数を呼び出し
+        # 実際のVRMビューワーを使用したデータセット生成を実装
+        # signal only works in main thread of the main interpreterエラーを回避するための実装
+        import threading
+        from backend.dataset_generator import generate_dataset
+        
+        # 進捗を更新するためのコールバック関数 - 新しいインターフェースに合わせて修正
+        def progress_update_callback(progress_data: Dict[str, Any], message: str = None):
+            # progress_dataから情報を取得
+            if isinstance(progress_data, dict):
+                # 新しいインターフェース: 辞書型で進捗情報が渡される場合
+                progress = progress_data.get("progress", 0)
+                message = progress_data.get("status", message or "処理中...")
+            else:
+                # 古いインターフェース: 進捗値が直接渡される場合
+                progress = progress_data
+                message = message or "処理中..."
+            
+            _update_dataset_progress(
+                job_id=job_id,
+                progress=progress,
+                message=message
+            )
+        
+        # use_minimalが設定にあれば、settingsに含める
+        if 'use_minimal' in parameters:
+            # すでにsettingsに入っているので何もしない
+            pass
+        else:
+            parameters['use_minimal'] = False
+        
+        # 実際のデータセット生成関数を呼び出し
         result_path = generate_dataset(
             job_id=job_id,
             vrm_file_path=file_path,
             settings=parameters,
-            progress_callback=lambda progress, message: _update_dataset_progress(job_id, progress, message),
-            use_minimal=parameters.get('use_minimal', False)
+            progress_callback=progress_update_callback
         )
         
         return result_path
-    
+        
     except Exception as e:
         logger.error(f"データセット生成中にエラーが発生: {str(e)}", exc_info=True)
         raise
@@ -710,6 +808,15 @@ def shutdown_job_processor() -> None:
         logger.info(f"アクティブなジョブにキャンセル要求を送信しました: {job_id}")
     
     logger.info("ジョブプロセッサがシャットダウンされました")
+
+def _get_processor():
+    """現在のJobProcessorインスタンスを取得"""
+    global _processor
+    return _processor
+
+def _process_job_async(job_id: str):
+    """非同期でジョブを処理するスレッドを開始"""
+    threading.Thread(target=_process_job, args=(job_id,)).start()
 
 # 起動時に自動初期化
 if __name__ == "__main__":

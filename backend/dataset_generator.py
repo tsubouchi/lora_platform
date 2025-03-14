@@ -22,6 +22,9 @@ from PIL import Image
 from pyppeteer import launch
 from pyppeteer.errors import NetworkError, TimeoutError as PyppeteerTimeoutError
 from pathlib import Path
+import tempfile
+import random
+import pyppeteer
 
 # ロギング設定
 os.makedirs("storage/logs", exist_ok=True)
@@ -63,553 +66,365 @@ class JobCancelledError(Exception):
     pass
 
 class DatasetGenerator:
-    """VRMファイルからデータセットを生成するクラス"""
-    
-    def __init__(self, job_id: str, vrm_file_path: str, settings: Optional[Dict[str, Any]] = None):
-        """
-        初期化
-        
+    def __init__(self, base_url: str = None):
+        """DatasetGenerator の初期化
+
         Args:
-            job_id: ジョブID
-            vrm_file_path: VRMファイルのパス
-            settings: データセット生成設定（指定しない場合はデフォルト設定を使用）
+            base_url (str, optional): ベースURL。Noneの場合はローカルVRMビューワーを使用
         """
-        self.job_id = job_id
-        self.vrm_file_path = vrm_file_path
-        self.vrm_file_name = os.path.basename(vrm_file_path)
-        self.output_dir = os.path.join(TEMP_DIR, job_id)
-        self.settings = settings or self._load_default_settings()
-        self.metadata = {
-            "job_id": job_id,
-            "vrm_file": self.vrm_file_name,
-            "parameters": {},
-            "total_shots": 0,
-            "shots": [],
-            "timestamp": datetime.now().isoformat(),
-        }
+        # ローカルVRMビューワーのURLをデフォルトとして使用
+        self.base_url = base_url or "http://localhost:8000/static/vrm_viewer.html"
         self.browser = None
         self.page = None
-        self.progress_callback = None
-        self.current_progress = 0
-        self.is_cancelled = False
-        self.current_step = "initializing"
-        
-        # キャンセル状態を追跡するための辞書に登録
-        active_jobs[job_id] = self
-        
-    def __del__(self):
-        """デストラクタ - ジョブ辞書から削除"""
-        if self.job_id in active_jobs:
-            del active_jobs[self.job_id]
-        
-    def _load_default_settings(self) -> Dict[str, Any]:
-        """デフォルト設定をロード"""
+        self.temp_dir = None
+        self.dataset_dir = None
+        self.metadata = {}
+        self.total_shots = 0
+        self.current_shot = 0
+
+    async def _set_up_browser(self):
+        """ブラウザをセットアップする"""
         try:
-            with open(DEFAULT_SETTINGS_PATH, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f)
-        except Exception as e:
-            logger.error(f"デフォルト設定ファイルの読み込みに失敗しました: {str(e)}")
-            # 基本的なデフォルト設定を返す
-            return {
-                "angle": {"start": 0, "end": 350, "step": 10},
-                "expressions": ["Neutral"],
-                "lighting": ["Normal"],
-                "camera_distance": ["Mid-shot", "Close-up"],
-                "output": {
-                    "format": "png",
-                    "resolution": "512x512",
-                    "quality": 90,
-                    "background": "#FFFFFF"
-                }
+            logger.info("ブラウザセットアップ開始")
+            
+            # ブラウザオプションの設定
+            browser_options = {
+                "headless": True,
+                "args": [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-accelerated-2d-canvas",
+                    "--no-first-run",
+                    "--no-zygote",
+                    "--single-process",
+                    "--disable-gpu"
+                ],
+                # シグナルハンドリングオプションを無効化
+                "handleSIGINT": False,
+                "handleSIGTERM": False,
+                "handleSIGHUP": False
             }
             
-    def set_progress_callback(self, callback: Callable[[int, str], None]):
-        """進捗コールバックを設定"""
-        self.progress_callback = callback
+            logger.debug(f"ブラウザ起動オプション: {browser_options}")
+            self.browser = await pyppeteer.launch(browser_options)
+            self.page = await self.browser.newPage()
             
-    def _update_progress(self, progress: int, message: str = "", step: str = None):
-        """
-        進捗状況を更新
-        
+            # ビューポートの設定
+            await self.page.setViewport({
+                "width": 1280,
+                "height": 720
+            })
+            
+            logger.info("ブラウザセットアップ完了")
+            return True
+        except Exception as e:
+            logger.error(f"ブラウザ起動エラー: {str(e)}")
+            raise Exception(f"ブラウザ起動エラー: {str(e)}")
+
+    async def _navigate_to_viewer(self, vrm_file_path: str, job_id: str):
+        """VRMビューワーページに移動する
+
         Args:
-            progress: 進捗率（0-100）
-            message: 進捗メッセージ
-            step: 現在のステップ識別子
+            vrm_file_path (str): VRMファイルのパス
+            job_id (str): ジョブID
+
+        Returns:
+            bool: 成功時True
         """
-        self.current_progress = progress
-        if step:
-            self.current_step = step
-            
-        if self.progress_callback:
-            self.progress_callback(progress, message)
-        logger.info(f"進捗: {progress}% - {message}")
-        
-        # キャンセル状態をチェック
-        if self.is_cancelled:
-            raise JobCancelledError("ジョブがキャンセルされました")
-            
-    def cancel(self):
-        """ジョブをキャンセル"""
-        logger.info(f"ジョブ {self.job_id} をキャンセルします")
-        self.is_cancelled = True
-        # ブラウザを非同期でクローズ
-        if self.browser:
-            asyncio.create_task(self._close_browser())
-            
-    async def _close_browser(self):
-        """ブラウザを安全にクローズ"""
         try:
+            # ファイル名のみを取得
+            filename = os.path.basename(vrm_file_path)
+            
+            # ローカルVRMビューワーのURLを生成
+            viewer_url = f"{self.base_url}?vrm=/vrm/{filename}&job_id={job_id}"
+            logger.info(f"ビューワーURL: {viewer_url}")
+            
+            # ページ移動
+            await self.page.goto(viewer_url, {"waitUntil": "networkidle0", "timeout": 60000})
+            logger.info("VRMビューワーページ読み込み完了")
+            
+            # VRMモデルが読み込まれるまで待機
+            await self.page.waitForFunction(
+                "document.getElementById('loading').style.display === 'none'",
+                {"timeout": 60000}
+            )
+            logger.info("VRMモデル読み込み完了")
+            
+            return True
+        except Exception as e:
+            logger.error(f"VRMビューワー読み込みエラー: {str(e)}")
+            raise Exception(f"VRMビューワー読み込みに失敗しました: {str(e)}")
+
+    async def _take_screenshot(self, expression: str, lighting: str, distance: str, angle: int):
+        """指定した設定でスクリーンショットを撮影する
+
+        Args:
+            expression (str): 表情設定
+            lighting (str): ライティング設定
+            distance (str): カメラ距離設定
+            angle (int): 回転角度
+
+        Returns:
+            str: スクリーンショットのパス
+        """
+        try:
+            # 表情の設定
+            await self.page.select('#expression', expression)
+            
+            # ライティングの設定
+            await self.page.select('#lighting', lighting)
+            
+            # カメラ距離の設定
+            await self.page.select('#distance', distance)
+            
+            # 回転角度の設定
+            await self.page.evaluate(f"document.getElementById('rotation').value = {angle}")
+            await self.page.evaluate(f"document.getElementById('rotationValue').textContent = {angle}")
+            await self.page.evaluate(f"updateRotation({angle})")
+            
+            # 少し待機して3Dモデルをレンダリングする時間を確保
+            await asyncio.sleep(0.2)
+            
+            # スクリーンショットボタンをクリック
+            await self.page.click('#takeScreenshot')
+            
+            # 次のスクリーンショットまで少し待機
+            await asyncio.sleep(0.5)
+            
+            # ファイル名の生成 (実際のファイルはAPIで保存される)
+            filename = f"{expression}_{lighting}_{distance}_{angle}.png"
+            
+            self.current_shot += 1
+            return filename
+        except Exception as e:
+            logger.error(f"スクリーンショット撮影エラー: {str(e)}")
+            raise Exception(f"スクリーンショット撮影に失敗しました: {str(e)}")
+
+    def _collect_screenshots(self, job_id: str) -> List[str]:
+        """撮影したスクリーンショットを収集する
+
+        Args:
+            job_id (str): ジョブID
+
+        Returns:
+            List[str]: スクリーンショットファイルのリスト
+        """
+        # スクリーンショットディレクトリ
+        screenshot_dir = os.path.join("backend/temp/screenshots", job_id)
+        
+        # ディレクトリが存在しない場合はエラー
+        if not os.path.exists(screenshot_dir):
+            logger.error(f"スクリーンショットディレクトリが見つかりません: {screenshot_dir}")
+            raise Exception(f"スクリーンショットディレクトリが見つかりません")
+        
+        # スクリーンショットファイルの収集
+        screenshot_files = []
+        for filename in os.listdir(screenshot_dir):
+            if filename.endswith(".png"):
+                filepath = os.path.join(screenshot_dir, filename)
+                # データセットディレクトリにコピー
+                shutil.copy2(filepath, self.dataset_dir)
+                screenshot_files.append(filename)
+        
+        logger.info(f"収集したスクリーンショット: {len(screenshot_files)}枚")
+        return screenshot_files
+
+    async def _generate_dataset_async(self, vrm_file_path: str, job_id: str, settings: Dict[str, Any], progress_callback: Optional[Callable] = None):
+        """データセットを非同期で生成する
+
+        Args:
+            vrm_file_path (str): VRMファイルのパス
+            job_id (str): ジョブID
+            settings (Dict[str, Any]): 生成設定
+            progress_callback (Optional[Callable], optional): 進捗コールバック
+
+        Returns:
+            str: 生成されたデータセットのZIPファイルパス
+        """
+        try:
+            # 一時ディレクトリの作成
+            self.temp_dir = tempfile.mkdtemp()
+            self.dataset_dir = os.path.join(self.temp_dir, "dataset")
+            os.makedirs(self.dataset_dir, exist_ok=True)
+            
+            # メタデータの初期化
+            self.metadata = {
+                "vrm_file": os.path.basename(vrm_file_path),
+                "job_id": job_id,
+                "settings": settings,
+                "screenshots": []
+            }
+            
+            # ブラウザのセットアップ
+            if progress_callback:
+                progress_callback({"status": "ブラウザをセットアップしています", "progress": 5}, "ブラウザをセットアップしています")
+            
+            await self._set_up_browser()
+            
+            # VRMビューワーへの移動
+            if progress_callback:
+                progress_callback({"status": "VRMビューワーを読み込んでいます", "progress": 10}, "VRMビューワーを読み込んでいます")
+            
+            await self._navigate_to_viewer(vrm_file_path, job_id)
+            
+            # 最小設定を使用する場合
+            use_minimal = settings.get("use_minimal", False)
+            
+            # 撮影設定の設定
+            if use_minimal:
+                # 最小限の設定（開発用）
+                expressions = ["Neutral"]
+                lightings = ["Normal"]
+                distances = ["Mid-shot"]
+                angles = [0, 90, 180, 270]
+            else:
+                # 本番用の設定
+                expressions = ["Neutral", "Happy", "Sad", "Angry", "Surprised"]
+                lightings = ["Normal", "Bright", "Soft"]
+                distances = ["Close-up", "Mid-shot", "Full-body"]
+                angles = list(range(0, 360, 45))  # 0, 45, 90, 135, 180, 225, 270, 315
+            
+            # 総ショット数の計算
+            self.total_shots = len(expressions) * len(lightings) * len(distances) * len(angles)
+            logger.info(f"総ショット数: {self.total_shots}")
+            
+            if progress_callback:
+                progress_callback({
+                    "status": "スクリーンショットを撮影しています", 
+                    "progress": 15,
+                    "total_shots": self.total_shots
+                }, "スクリーンショットを撮影しています")
+            
+            # スクリーンショットの撮影
+            self.current_shot = 0
+            base_progress = 15
+            progress_per_shot = 70 / self.total_shots  # 15%から85%までを使用
+            
+            for expr in expressions:
+                for light in lightings:
+                    for dist in distances:
+                        for angle in angles:
+                            filename = await self._take_screenshot(expr, light, dist, angle)
+                            
+                            # 進捗の更新
+                            if progress_callback:
+                                current_progress = base_progress + (self.current_shot * progress_per_shot)
+                                progress_callback({
+                                    "status": "スクリーンショットを撮影しています",
+                                    "progress": int(current_progress),
+                                    "current_shot": self.current_shot,
+                                    "total_shots": self.total_shots,
+                                    "filename": filename
+                                }, f"スクリーンショット撮影中 ({self.current_shot}/{self.total_shots})")
+            
+            # スクリーンショットの収集
+            if progress_callback:
+                progress_callback({"status": "スクリーンショットを集めています", "progress": 85}, "スクリーンショットを集めています")
+            
+            screenshot_files = self._collect_screenshots(job_id)
+            self.metadata["screenshots"] = screenshot_files
+            
+            # メタデータファイルの作成
+            if progress_callback:
+                progress_callback({"status": "メタデータを作成しています", "progress": 90}, "メタデータを作成しています")
+            
+            metadata_path = os.path.join(self.dataset_dir, "metadata.json")
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(self.metadata, f, ensure_ascii=False, indent=2)
+            
+            # ZIPファイルの作成
+            if progress_callback:
+                progress_callback({"status": "ZIPファイルを作成しています", "progress": 95}, "ZIPファイルを作成しています")
+            
+            zip_filename = f"{job_id}_dataset.zip"
+            zip_path = os.path.join(self.temp_dir, zip_filename)
+            
+            with zipfile.ZipFile(zip_path, "w") as zipf:
+                for root, _, files in os.walk(self.dataset_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, self.temp_dir)
+                        zipf.write(file_path, arcname)
+            
+            logger.info(f"データセットZIPファイル作成完了: {zip_path}")
+            
+            # ブラウザを閉じる
             if self.browser:
                 await self.browser.close()
                 self.browser = None
-        except Exception as e:
-            logger.error(f"ブラウザのクローズに失敗しました: {str(e)}")
             
-    def calculate_total_shots(self) -> int:
-        """撮影する総枚数を計算"""
-        angle_settings = self.settings.get("angle", {})
-        start = angle_settings.get("start", 0)
-        end = angle_settings.get("end", 350)
-        step = angle_settings.get("step", 10)
-        
-        angle_count = len(range(start, end + 1, step))
-        expressions = self.settings.get("expressions", ["Neutral"])
-        lighting = self.settings.get("lighting", ["Normal"])
-        camera_distance = self.settings.get("camera_distance", ["Mid-shot"])
-        
-        total = angle_count * len(expressions) * len(lighting) * len(camera_distance)
-        return total
-            
-    async def generate_dataset(self, use_minimal: bool = False) -> str:
-        """
-        データセットを生成
-        
-        Args:
-            use_minimal: 最小構成を使用するかどうか
-            
-        Returns:
-            生成されたZIPファイルのパス
-        """
-        try:
-            start_time = time.time()
-            
-            # 出力ディレクトリを作成
-            os.makedirs(self.output_dir, exist_ok=True)
-            
-            # 総枚数を計算
-            if use_minimal and "minimal_config" in self.settings:
-                # 最小構成の場合は設定を上書き
-                expressions = self.settings["minimal_config"].get("expressions", ["Neutral"])
-                lighting = self.settings["minimal_config"].get("lighting", ["Normal"])
-                camera_distance = self.settings["minimal_config"].get("camera_distance", ["Mid-shot", "Close-up"])
-                self.settings["expressions"] = expressions
-                self.settings["lighting"] = lighting
-                self.settings["camera_distance"] = camera_distance
-                
-            total_shots = self.calculate_total_shots()
-            self.metadata["parameters"] = {
-                "angle_start": self.settings["angle"]["start"],
-                "angle_end": self.settings["angle"]["end"],
-                "angle_step": self.settings["angle"]["step"],
-                "expressions": self.settings["expressions"],
-                "lighting": self.settings["lighting"],
-                "camera_distance": self.settings["camera_distance"],
-                "use_minimal": use_minimal
-            }
-            self.metadata["total_shots"] = total_shots
-            
-            logger.info(f"データセット生成開始: 総枚数 {total_shots}枚")
-            self._update_progress(1, f"ブラウザ初期化中...", "initializing")
-            
-            # ブラウザを起動
-            await self._set_up_browser()
-            
-            # VRMファイルをアップロード
-            self._update_progress(10, f"VRMファイルをアップロード中: {self.vrm_file_name}", "uploading")
-            try:
-                await self._upload_vrm_file()
-            except Exception as e:
-                logger.error(f"VRMファイルのアップロードに失敗しました: {str(e)}")
-                raise DatasetGenerationError(f"VRMファイルのアップロードに失敗しました: {str(e)}")
-            
-            # モデルが読み込まれるまで待機
-            await asyncio.sleep(3)
-            
-            # スクリーンショット撮影
-            self._update_progress(15, f"スクリーンショット撮影開始...", "capturing")
-            try:
-                await self._capture_screenshots()
-            except JobCancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"スクリーンショット撮影中にエラーが発生しました: {str(e)}")
-                raise DatasetGenerationError(f"スクリーンショット撮影に失敗しました: {str(e)}")
-            
-            # メタデータを保存
-            self._update_progress(92, f"メタデータを保存中...", "processing")
-            metadata_path = os.path.join(self.output_dir, "metadata.json")
-            with open(metadata_path, 'w', encoding='utf-8') as f:
-                json.dump(self.metadata, f, ensure_ascii=False, indent=2)
-                
-            # ZIPファイルを作成
-            self._update_progress(95, f"ZIPファイル作成中...", "compressing")
-            zip_path = os.path.join(DATASET_DIR, f"{self.job_id}.zip")
-            try:
-                self._create_zip_archive(zip_path)
-            except Exception as e:
-                logger.error(f"ZIPファイル作成中にエラーが発生しました: {str(e)}")
-                raise DatasetGenerationError(f"ZIPファイル作成に失敗しました: {str(e)}")
-            
-            # 一時ディレクトリを削除
-            try:
-                shutil.rmtree(self.output_dir)
-            except Exception as e:
-                logger.warning(f"一時ディレクトリの削除に失敗しました: {str(e)}")
-            
-            elapsed_time = time.time() - start_time
-            logger.info(f"データセット生成完了: 所要時間 {elapsed_time:.2f}秒")
-            self._update_progress(100, f"データセット生成完了: 合計 {total_shots}枚", "completed")
+            if progress_callback:
+                progress_callback({"status": "処理完了", "progress": 100}, "データセット生成が完了しました")
             
             return zip_path
-            
-        except JobCancelledError:
-            logger.info(f"ジョブ {self.job_id} がキャンセルされました")
-            # 一時ファイルのクリーンアップ
-            if os.path.exists(self.output_dir):
-                try:
-                    shutil.rmtree(self.output_dir)
-                except:
-                    pass
-            raise
-            
         except Exception as e:
-            logger.error(f"データセット生成エラー: {str(e)}", exc_info=True)
-            self._update_progress(0, f"エラー: {str(e)}", "error")
-            # 一時ファイルのクリーンアップ
-            if os.path.exists(self.output_dir):
-                try:
-                    shutil.rmtree(self.output_dir)
-                except:
-                    pass
-            raise
-            
-        finally:
-            # ブラウザを確実に閉じる
+            logger.error(f"データセット生成エラー: {str(e)}")
+            # ブラウザを閉じる
             if self.browser:
-                try:
-                    await self.browser.close()
-                    self.browser = None
-                except:
-                    logger.error("ブラウザのクローズに失敗しました", exc_info=True)
-            
-            # アクティブジョブから削除
-            if self.job_id in active_jobs:
-                del active_jobs[self.job_id]
-                
-    async def _set_up_browser(self) -> None:
-        """ブラウザを起動し、VRM Viewerページを開く"""
-        try:
-            # システムに最適なChromiumオプションを取得
-            browser_options = get_optimal_chromium_executable()
-            logger.info(f"ブラウザ起動オプション: {browser_options}")
-            
-            self.browser = await launch(**browser_options)
-            self.page = await self.browser.newPage()
-            
-            # VRM Viewerページを開く
-            await self.page.goto("https://vrm-viewer.com/", {
-                "waitUntil": "networkidle0",
-                "timeout": 60000
-            })
-            logger.info("VRM Viewerページを開きました")
-            
-            # ページが読み込まれたか確認
-            await self.page.waitForSelector("#app", {"timeout": 30000})
-            logger.info("VRM Viewerページの読み込みを確認")
-        
-        except PyppeteerTimeoutError:
-            error_msg = "VRM Viewerページの読み込みタイムアウト"
-            logger.error(error_msg)
-            raise DatasetGenerationError(error_msg)
-        except Exception as e:
-            error_msg = f"ブラウザ起動エラー: {str(e)}"
-            logger.error(error_msg)
-            raise DatasetGenerationError(error_msg)
-            
-    async def _upload_vrm_file(self):
-        """VRMファイルをアップロード"""
-        # ファイル選択エレメントを取得
-        file_input = await self.page.querySelector('input[type="file"]')
-        if not file_input:
-            raise ValueError("ファイル選択エレメントが見つかりません")
-            
-        # VRMファイルをアップロード
-        await file_input.uploadFile(self.vrm_file_path)
-        
-        # モデルがロードされるのを待機
-        try:
-            await self.page.waitForFunction(
-                'document.querySelector(".model-loaded") !== null || document.querySelector(".error-message") !== null',
-                {"timeout": 30000}
-            )
-            
-            # エラーメッセージをチェック
-            error_element = await self.page.querySelector(".error-message")
-            if error_element:
-                error_text = await self.page.evaluate('(element) => element.textContent', error_element)
-                raise ValueError(f"モデルのロードに失敗: {error_text}")
-                
-        except PyppeteerTimeoutError:
-            raise TimeoutError("VRMファイルのロードがタイムアウトしました")
-            
-        logger.info(f"VRMファイルアップロード成功: {self.vrm_file_name}")
-                
-    async def _capture_screenshots(self):
-        """スクリーンショットを撮影"""
-        angle_settings = self.settings.get("angle", {})
-        start = angle_settings.get("start", 0)
-        end = angle_settings.get("end", 350)
-        step = angle_settings.get("step", 10)
-        
-        expressions = self.settings.get("expressions", ["Neutral"])
-        lighting = self.settings.get("lighting", ["Normal"])
-        camera_distance = self.settings.get("camera_distance", ["Mid-shot"])
-        
-        total_shots = self.calculate_total_shots()
-        current_shot = 0
-        
-        # 全ての組み合わせでスクリーンショットを撮影
-        for expression_idx, expression in enumerate(expressions):
-            try:
-                await self._set_expression(expression)
-            except Exception as e:
-                logger.warning(f"表情設定エラー: {expression}: {str(e)}")
-                continue
-                
-            for light_idx, light in enumerate(lighting):
-                try:
-                    await self._set_lighting(light)
-                except Exception as e:
-                    logger.warning(f"ライティング設定エラー: {light}: {str(e)}")
-                    continue
-                    
-                for dist_idx, distance in enumerate(camera_distance):
-                    try:
-                        await self._set_camera_distance(distance)
-                    except Exception as e:
-                        logger.warning(f"カメラ距離設定エラー: {distance}: {str(e)}")
-                        continue
-                        
-                    for angle in range(start, end + 1, step):
-                        # キャンセル状態をチェック
-                        if self.is_cancelled:
-                            raise JobCancelledError("ジョブがキャンセルされました")
-                            
-                        try:
-                            await self._rotate_model(angle)
-                            
-                            # スクリーンショットを撮影
-                            file_name = self._get_file_name(expression, light, distance, angle)
-                            file_path = os.path.join(self.output_dir, file_name)
-                            await self._take_screenshot(file_path)
-                            
-                            # メタデータに追加
-                            self.metadata["shots"].append({
-                                "filename": file_name,
-                                "expression": expression,
-                                "lighting": light,
-                                "camera_distance": distance,
-                                "angle": angle
-                            })
-                            
-                            # 進捗更新
-                            current_shot += 1
-                            progress = int(15 + (current_shot / total_shots * 75))
-                            self._update_progress(
-                                progress,
-                                f"撮影中: {current_shot}/{total_shots} - {expression}, {light}, {distance}, 角度{angle}°",
-                                "capturing"
-                            )
-                            
-                            # 短い待機（負荷軽減）
-                            await asyncio.sleep(0.1)
-                            
-                        except JobCancelledError:
-                            raise
-                        except Exception as e:
-                            logger.warning(f"角度 {angle}° での撮影に失敗: {str(e)}")
-                            continue
-                        
-    async def _set_expression(self, expression: str):
-        """表情を設定"""
-        logger.info(f"表情設定: {expression}")
-        try:
-            # 表情パネルを開く
-            await self.page.click('.expression-panel-button')
-            await asyncio.sleep(0.5)
-            
-            # 表情を選択（表情に対応するボタンをクリック）
-            expression_selectors = {
-                "Neutral": ".expression-neutral",
-                "Happy": ".expression-happy",
-                "Sad": ".expression-sad",
-                "Angry": ".expression-angry",
-                "Surprised": ".expression-surprised"
-            }
-            
-            if expression in expression_selectors:
-                await self.page.click(expression_selectors[expression])
-            else:
-                logger.warning(f"未対応の表情: {expression}、デフォルトを使用します")
-                await self.page.click(".expression-neutral")
-                
-            # 表情パネルを閉じる
-            await asyncio.sleep(0.5)
-            await self.page.click('.expression-panel-close')
-        except Exception as e:
-            logger.error(f"表情設定中にエラーが発生しました: {str(e)}")
-            raise ValueError(f"表情設定に失敗しました: {str(e)}")
-        
-    async def _set_lighting(self, lighting: str):
-        """ライティングを設定"""
-        logger.info(f"ライティング設定: {lighting}")
-        try:
-            # ライティングパネルを開く
-            await self.page.click('.lighting-panel-button')
-            await asyncio.sleep(0.5)
-            
-            # ライティングを選択
-            lighting_selectors = {
-                "Bright": ".lighting-bright",
-                "Normal": ".lighting-normal",
-                "Soft": ".lighting-soft",
-                "Dark": ".lighting-dark",
-                "Warm": ".lighting-warm",
-                "Cool": ".lighting-cool"
-            }
-            
-            if lighting in lighting_selectors:
-                await self.page.click(lighting_selectors[lighting])
-            else:
-                logger.warning(f"未対応のライティング: {lighting}、デフォルトを使用します")
-                await self.page.click(".lighting-normal")
-                
-            # ライティングパネルを閉じる
-            await asyncio.sleep(0.5)
-            await self.page.click('.lighting-panel-close')
-        except Exception as e:
-            logger.error(f"ライティング設定中にエラーが発生しました: {str(e)}")
-            raise ValueError(f"ライティング設定に失敗しました: {str(e)}")
-        
-    async def _set_camera_distance(self, distance: str):
-        """カメラ距離を設定"""
-        logger.info(f"カメラ距離設定: {distance}")
-        try:
-            # カメラパネルを開く
-            await self.page.click('.camera-panel-button')
-            await asyncio.sleep(0.5)
-            
-            # カメラ距離を選択
-            distance_selectors = {
-                "Close-up": ".camera-closeup",
-                "Mid-shot": ".camera-midshot",
-                "Full-body": ".camera-fullbody"
-            }
-            
-            if distance in distance_selectors:
-                await self.page.click(distance_selectors[distance])
-            else:
-                logger.warning(f"未対応のカメラ距離: {distance}、デフォルトを使用します")
-                await self.page.click(".camera-midshot")
-                
-            # カメラパネルを閉じる
-            await asyncio.sleep(0.5)
-            await self.page.click('.camera-panel-close')
-        except Exception as e:
-            logger.error(f"カメラ距離設定中にエラーが発生しました: {str(e)}")
-            raise ValueError(f"カメラ距離設定に失敗しました: {str(e)}")
-        
-    async def _rotate_model(self, angle: int):
-        """モデルを回転"""
-        try:
-            # モデル回転スライダーを操作
-            await self.page.evaluate(f"""() => {{
-                document.querySelector('.rotation-slider').value = {angle};
-                document.querySelector('.rotation-slider').dispatchEvent(new Event('input'));
-            }}""")
-            await asyncio.sleep(0.2)  # 回転アニメーションが完了するまで待機
-        except Exception as e:
-            logger.error(f"モデル回転中にエラーが発生しました: {str(e)}")
-            raise ValueError(f"モデル回転に失敗しました: {str(e)}")
-        
-    async def _take_screenshot(self, file_path: str):
-        """スクリーンショットを撮影"""
-        try:
-            # スクリーンショットを撮影
-            viewport_area = await self.page.evaluate("""() => {
-                const modelViewer = document.querySelector('.model-viewer');
-                if (!modelViewer) return null;
-                const rect = modelViewer.getBoundingClientRect();
-                return {
-                    x: rect.x,
-                    y: rect.y,
-                    width: rect.width,
-                    height: rect.height
-                };
-            }""")
-            
-            if not viewport_area:
-                raise ValueError("モデルビューア要素が見つかりません")
-            
-            await self.page.screenshot({
-                'path': file_path,
-                'clip': viewport_area,
-                'type': 'png',
-                'omitBackground': True
-            })
-            
-            # 解像度を調整
-            self._resize_image(file_path)
-            
-        except Exception as e:
-            logger.error(f"スクリーンショット撮影中にエラーが発生しました: {str(e)}")
-            raise ValueError(f"スクリーンショット撮影に失敗しました: {str(e)}")
-        
-    def _resize_image(self, file_path: str):
-        """画像の解像度を調整"""
-        resolution = self.settings.get("output", {}).get("resolution", "512x512")
-        try:
-            width, height = map(int, resolution.split("x"))
-            with Image.open(file_path) as img:
-                resized_img = img.resize((width, height), Image.LANCZOS)
-                resized_img.save(file_path, quality=self.settings.get("output", {}).get("quality", 90))
-        except Exception as e:
-            logger.warning(f"画像リサイズエラー: {str(e)}")
-            raise ValueError(f"画像リサイズに失敗しました: {str(e)}")
-            
-    def _get_file_name(self, expression: str, lighting: str, distance: str, angle: int) -> str:
-        """ファイル名を生成"""
-        naming_format = self.settings.get("metadata", {}).get(
-            "naming_format", 
-            "shot_{expression}_{lighting}_{distance}_angle{angle:03d}.png"
-        )
-        return naming_format.format(
-            expression=expression,
-            lighting=lighting,
-            distance=distance,
-            angle=angle
-        )
-        
-    def _create_zip_archive(self, zip_path: str):
-        """ZIPアーカイブを作成"""
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(self.output_dir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, self.output_dir)
-                    zipf.write(file_path, arcname)
-        logger.info(f"ZIPアーカイブ作成完了: {zip_path}")
+                await self.browser.close()
+                self.browser = None
+            raise Exception(f"データセット生成に失敗しました: {str(e)}")
+        finally:
+            # 一時ディレクトリの削除は呼び出し元で行う
+            pass
 
+    def cleanup(self):
+        """一時ファイルのクリーンアップ"""
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+            logger.info(f"一時ディレクトリを削除しました: {self.temp_dir}")
+            self.temp_dir = None
+
+def run_async_in_thread(coro):
+    """非同期コルーチンをスレッド内で実行するためのヘルパー関数"""
+    try:
+        # スレッド専用のイベントループを作成
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # コルーチンを実行
+        result = loop.run_until_complete(coro)
+        
+        # ループを閉じる
+        loop.close()
+        
+        return result
+    except Exception as e:
+        logger.error(f"非同期処理エラー: {str(e)}")
+        raise e
+
+def generate_dataset(job_id: str, vrm_file_path: str, settings: Dict[str, Any], progress_callback: Optional[Callable] = None) -> str:
+    """データセットを生成する
+
+    Args:
+        job_id (str): ジョブID
+        vrm_file_path (str): VRMファイルのパス
+        settings (Dict[str, Any]): 生成設定
+        progress_callback (Optional[Callable], optional): 進捗コールバック関数
+
+    Returns:
+        str: 生成されたデータセットのZIPファイルパス
+    """
+    logger.info(f"データセット生成開始: ジョブID {job_id}, ファイル {vrm_file_path}")
+    
+    # DatasetGeneratorインスタンスの作成
+    generator = DatasetGenerator()
+    
+    try:
+        # スレッド内で非同期処理を実行
+        zip_path = run_async_in_thread(
+            generator._generate_dataset_async(vrm_file_path, job_id, settings, progress_callback)
+        )
+        
+        logger.info(f"データセット生成完了: {zip_path}")
+        return zip_path
+    except Exception as e:
+        logger.error(f"データセット生成エラー: {str(e)}")
+        raise e
+    finally:
+        # クリーンアップ
+        generator.cleanup()
 
 # Chromiumのバージョン管理関連の関数
 def get_system_chrome_version() -> Optional[str]:
@@ -783,73 +598,6 @@ def cancel_job(job_id: str) -> bool:
 def format_error_traceback(e: Exception) -> str:
     """エラーのトレースバックを整形された文字列として返す"""
     return ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-
-
-async def generate_dataset_async(job_id: str, vrm_file_path: str, settings: Optional[Dict[str, Any]] = None, 
-                                progress_callback=None, use_minimal: bool = False) -> str:
-    """
-    非同期でデータセットを生成
-    
-    Args:
-        job_id: ジョブID
-        vrm_file_path: VRMファイルのパス
-        settings: データセット生成設定
-        progress_callback: 進捗コールバック関数
-        use_minimal: 最小構成を使用するかどうか
-        
-    Returns:
-        生成されたZIPファイルのパス
-    """
-    # ディレクトリが存在することを確認
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    os.makedirs(DATASET_DIR, exist_ok=True)
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    
-    # データセット生成
-    generator = DatasetGenerator(job_id, vrm_file_path, settings)
-    if progress_callback:
-        generator.set_progress_callback(progress_callback)
-        
-    try:
-        return await generator.generate_dataset(use_minimal)
-    except JobCancelledError:
-        logger.info(f"ジョブ {job_id} がキャンセルされました")
-        return None
-    except Exception as e:
-        logger.error(f"データセット生成エラー: {str(e)}", exc_info=True)
-        error_detail = format_error_traceback(e)
-        raise DatasetGenerationError(f"データセット生成に失敗しました: {str(e)}\n{error_detail}")
-
-
-def generate_dataset(job_id: str, vrm_file_path: str, settings: Optional[Dict[str, Any]] = None,
-                   progress_callback=None, use_minimal: bool = False) -> str:
-    """
-    同期的にデータセットを生成（非同期関数のラッパー）
-    
-    Args:
-        job_id: ジョブID
-        vrm_file_path: VRMファイルのパス
-        settings: データセット生成設定
-        progress_callback: 進捗コールバック関数
-        use_minimal: 最小構成を使用するかどうか
-        
-    Returns:
-        生成されたZIPファイルのパス
-    """
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        # イベントループが存在しない場合は新規作成
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-    try:
-        return loop.run_until_complete(
-            generate_dataset_async(job_id, vrm_file_path, settings, progress_callback, use_minimal)
-        )
-    except JobCancelledError:
-        logger.info(f"ジョブ {job_id} がキャンセルされました")
-        return None
 
 
 # モジュールレベルの初期化コード
